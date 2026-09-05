@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+misr_platform.db
+uploads/
+.venv/

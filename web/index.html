@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>منصة مصر متعددة القطاعات</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- شاشة الدخول -->
+  <div id="login" class="login-wrap">
+    <div class="login-card">
+      <div class="logo">🇪🇬</div>
+      <h1>منصة مصر</h1>
+      <div class="sub">منصة موحّدة متعددة القطاعات</div>
+      <div class="field">
+        <label>اسم المستخدم</label>
+        <input id="lg-user" value="admin" autocomplete="username">
+      </div>
+      <div class="field">
+        <label>كلمة المرور</label>
+        <input id="lg-pass" type="password" value="admin123" autocomplete="current-password">
+      </div>
+      <button class="btn block" onclick="doLogin()">تسجيل الدخول</button>
+      <div id="lg-err" class="hint" style="color:var(--danger)"></div>
+      <div class="hint">
+        حسابات تجريبية:<br>
+        admin / admin123 — مدير &nbsp;•&nbsp; doctor / doc123 — طبيب<br>
+        reception / rec123 — استقبال &nbsp;•&nbsp; pharmacy / ph123 — صيدلية
+      </div>
+    </div>
+  </div>
+
+  <!-- التطبيق -->
+  <div id="app" class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="mark">🇪🇬</span>
+        <span class="name">منصة مصر<small>متعددة القطاعات</small></span>
+      </div>
+      <div class="nav-group">النظرة العامة</div>
+      <button class="nav-item" data-view="dashboard"><span class="ico">📊</span> مركز القيادة</button>
+      <button class="nav-item" data-view="finance"><span class="ico">💰</span> المالية</button>
+      <button class="nav-item" data-view="sectors"><span class="ico">🗂️</span> القطاعات</button>
+
+      <div class="nav-group">القطاع الطبي</div>
+      <button class="nav-item" data-view="appointments"><span class="ico">📅</span> الحجوزات</button>
+      <button class="nav-item" data-view="patients"><span class="ico">🧑‍⚕️</span> المرضى والسجل</button>
+      <button class="nav-item" data-view="doctors"><span class="ico">👨‍⚕️</span> الأطباء والتخصصات</button>
+      <button class="nav-item" data-view="radiology"><span class="ico">🩻</span> الأشعة</button>
+      <button class="nav-item" data-view="labs"><span class="ico">🧪</span> التحاليل</button>
+      <button class="nav-item" data-view="pharmacy"><span class="ico">💊</span> الصيدلية</button>
+      <button class="nav-item" data-view="entities"><span class="ico">🏥</span> المنشآت والأوراق</button>
+
+      <div class="nav-group">قطاع المقاولات</div>
+      <button class="nav-item" data-view="con_dashboard"><span class="ico">🏗️</span> لوحة المقاولات</button>
+      <button class="nav-item" data-view="workers"><span class="ico">👷</span> الصنايعية والمهندسون</button>
+      <button class="nav-item" data-view="con_projects"><span class="ico">📋</span> أوامر الشغل</button>
+      <button class="nav-item" data-view="con_firms"><span class="ico">🏢</span> المقاولون والموردون</button>
+
+      <div class="nav-group">القطاع العقاري</div>
+      <button class="nav-item" data-view="re_dashboard"><span class="ico">🏙️</span> لوحة العقارات</button>
+      <button class="nav-item" data-view="re_projects"><span class="ico">🏢</span> المشاريع والمطورون</button>
+      <button class="nav-item" data-view="re_units"><span class="ico">🔑</span> الوحدات</button>
+      <button class="nav-item" data-view="re_leads"><span class="ico">🎯</span> العملاء (قمع البيع)</button>
+
+      <div class="nav-group">قطاعات أخرى</div>
+      <button class="nav-item" data-view="marketing"><span class="ico">📣</span> التسويق العام</button>
+      <button class="nav-item" data-view="mobility"><span class="ico">🚗</span> التنقل</button>
+      <button class="nav-item" data-view="logistics"><span class="ico">🚚</span> الشحن واللوجستيات</button>
+      <button class="nav-item" data-view="agriculture"><span class="ico">🌾</span> الزراعة</button>
+      <button class="nav-item" data-view="law"><span class="ico">⚖️</span> المحاماة</button>
+
+      <div class="spacer" style="flex:1"></div>
+      <button class="nav-item" onclick="logout()"><span class="ico">🚪</span> خروج</button>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <h2 id="view-title">لوحة المعلومات</h2>
+        <div class="user">
+          <span id="notif-badge" class="pill blue" style="display:none"></span>
+          <span id="user-name"></span>
+          <span id="user-role" class="badge-role"></span>
+        </div>
+      </div>
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <!-- مودال عام -->
+  <div id="modal-back" class="modal-back">
+    <div class="modal">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
