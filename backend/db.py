@@ -454,6 +454,29 @@ CREATE TABLE IF NOT EXISTS law_cases (
 """
 
 
+# ============================================================================
+# طبقة التكامل (Integration) — بوابة الطلبات الموحّدة عبر كل القطاعات
+# ============================================================================
+INTEGRATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS service_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sector TEXT NOT NULL,                 -- القطاع المستهدف
+    service_type TEXT,                    -- نوع الخدمة المطلوبة
+    requester_name TEXT NOT NULL,         -- مقدّم الطلب
+    requester_phone TEXT,
+    governorate TEXT,
+    details TEXT,
+    priority TEXT DEFAULT 'عادي',         -- عادي / عاجل
+    status TEXT DEFAULT 'جديد',           -- جديد / قيد المعالجة / محوّل / مكتمل / ملغي
+    assigned_to INTEGER,                  -- المستخدم المسؤول
+    linked_type TEXT,                     -- نوع السجل الناتج (appointment/trip/shipment...)
+    linked_id INTEGER,                    -- معرّف السجل الناتج بعد التحويل
+    created_at TEXT,
+    updated_at TEXT
+);
+"""
+
+
 def _hash_pw(password, salt):
     return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
 
@@ -484,6 +507,7 @@ def init_db():
     conn.executescript(CORE_SCHEMA)
     conn.executescript(MEDICAL_SCHEMA)
     conn.executescript(OTHER_SECTORS_SCHEMA)
+    conn.executescript(INTEGRATION_SCHEMA)
     conn.commit()
     _migrate(conn)
     _seed(conn)
@@ -733,6 +757,23 @@ def _seed(conn):
         ]:
             conn.execute("INSERT INTO law_cases (case_no,client_name,case_type,court,status,next_session,created_at) VALUES (?,?,?,?,?,?,?)",
                          (cno, client, ctype, court, status, nxt, now))
+
+    # ---- طلبات موحّدة نموذجية (تكامل عبر القطاعات) ----
+    cur = conn.execute("SELECT COUNT(*) c FROM service_requests")
+    if cur.fetchone()["c"] == 0:
+        reqs = [
+            ("medical", "حجز كشف باطنة", "سمر أحمد", "01001234567", "القاهرة", "ألم بالمعدة منذ يومين", "عادي", "جديد"),
+            ("contracting", "طلب صنايعي سباكة", "محمد فؤاد", "01112223334", "الجيزة", "تسريب في المطبخ", "عاجل", "قيد المعالجة"),
+            ("realestate", "معاينة شقة", "خالد منصور", "01055556666", "القاهرة الجديدة", "مهتم بشقة 145م", "عادي", "محوّل"),
+            ("mobility", "طلب رحلة", "منى سعيد", "01099998888", "القاهرة", "من المعادي للمطار", "عاجل", "جديد"),
+            ("logistics", "طلب شحن", "متجر النور", "01077778888", "الإسكندرية", "شحنة 5 كجم للقاهرة", "عادي", "قيد المعالجة"),
+            ("law", "استشارة قانونية", "شركة الأمل", "01033334444", "القاهرة", "نزاع تجاري مع مورد", "عادي", "جديد"),
+        ]
+        for sector, stype, name, phone, gov, details, prio, status in reqs:
+            conn.execute(
+                """INSERT INTO service_requests (sector,service_type,requester_name,requester_phone,governorate,details,priority,status,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (sector, stype, name, phone, gov, details, prio, status, now, now))
 
     conn.commit()
 

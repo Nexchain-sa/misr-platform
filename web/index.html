@@ -42,6 +42,7 @@
       </div>
       <div class="nav-group">النظرة العامة</div>
       <button class="nav-item" data-view="dashboard"><span class="ico">📊</span> مركز القيادة</button>
+      <button class="nav-item" data-view="requests"><span class="ico">📨</span> بوابة الطلبات</button>
       <button class="nav-item" data-view="finance"><span class="ico">💰</span> المالية</button>
       <button class="nav-item" data-view="sectors"><span class="ico">🗂️</span> القطاعات</button>
 
@@ -80,8 +81,12 @@
     <main class="main">
       <div class="topbar">
         <h2 id="view-title">لوحة المعلومات</h2>
+        <div class="topbar-search">
+          <input id="global-search" placeholder="🔍 بحث موحّد في كل القطاعات…" autocomplete="off">
+          <div id="search-results" class="search-results"></div>
+        </div>
         <div class="user">
-          <span id="notif-badge" class="pill blue" style="display:none"></span>
+          <button id="notif-btn" class="notif-btn" onclick="openNotifications()">🔔<span id="notif-badge" class="notif-dot" style="display:none"></span></button>
           <span id="user-name"></span>
           <span id="user-role" class="badge-role"></span>
         </div>

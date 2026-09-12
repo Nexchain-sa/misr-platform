@@ -70,10 +70,64 @@ function startApp() {
     : USER.role === "contractor" ? "con_dashboard" : USER.role === "agent" ? "re_dashboard" : "dashboard";
   switchView(initial);
   loadNotifications();
+  setupGlobalSearch();
+}
+
+/* ================= البحث الموحّد ================= */
+let _searchTimer;
+function setupGlobalSearch() {
+  const box = el("global-search"), panel = el("search-results");
+  if (!box) return;
+  box.addEventListener("input", () => {
+    clearTimeout(_searchTimer);
+    const q = box.value.trim();
+    if (q.length < 1) { panel.classList.remove("open"); return; }
+    _searchTimer = setTimeout(async () => {
+      const data = await api("/search?q=" + encodeURIComponent(q));
+      renderSearch(data.results || []);
+    }, 250);
+  });
+  document.addEventListener("click", (e) => {
+    if (!el("search-results").contains(e.target) && e.target !== box) panel.classList.remove("open");
+  });
+}
+function renderSearch(results) {
+  const panel = el("search-results");
+  if (!results.length) { panel.innerHTML = '<div class="sr-empty">لا توجد نتائج</div>'; panel.classList.add("open"); return; }
+  const groups = {};
+  results.forEach(r => { (groups[r.type] = groups[r.type] || []).push(r); });
+  panel.innerHTML = Object.entries(groups).map(([type, items]) => `
+    <div class="sr-group">${esc(type)} (${items.length})</div>
+    ${items.map(it => `<div class="sr-item" onclick="gotoSearch('${it.view}')">
+      <div class="l">${esc(it.label)}</div><div class="s">${esc(it.sub)}</div></div>`).join("")}
+  `).join("");
+  panel.classList.add("open");
+}
+function gotoSearch(view) {
+  el("search-results").classList.remove("open");
+  el("global-search").value = "";
+  switchView(view);
+}
+
+/* ================= مركز الإشعارات ================= */
+window._notifs = [];
+async function openNotifications() {
+  const list = window._notifs.length ? window._notifs : await api("/notifications");
+  openModal("الإشعارات", `
+    ${list.length ? `<div style="text-align:left;margin-bottom:10px"><button class="btn sm ghost" onclick="markAllSeen()">تعليم الكل كمقروء</button></div>` : ""}
+    ${list.length ? list.map(n => `<div class="stat" style="margin-bottom:8px;padding:12px;${n.seen ? "opacity:.6" : "border-color:var(--primary)"}">
+      <div class="v sm">${n.seen ? "" : "🔵 "}${esc(n.title)}</div>
+      <div class="tl-meta">${esc(n.body)}</div>
+      <div class="tl-meta">${esc((n.created_at || "").replace("T", " "))}</div>
+    </div>`).join("") : '<div class="empty">لا توجد إشعارات</div>'}`);
+}
+async function markAllSeen() {
+  await api("/notifications/seen-all", { method: "PUT" });
+  window._notifs = []; closeModal(); loadNotifications(); toast("تم تعليم الكل كمقروء");
 }
 
 const VIEW_TITLES = {
-  dashboard: "مركز القيادة الموحّد", finance: "المالية عبر القطاعات", sectors: "القطاعات", appointments: "الحجوزات",
+  dashboard: "مركز القيادة الموحّد", requests: "بوابة الطلبات الموحّدة", finance: "المالية عبر القطاعات", sectors: "القطاعات", appointments: "الحجوزات",
   patients: "المرضى والسجل المرضي", doctors: "الأطباء والتخصصات", radiology: "الأشعة",
   labs: "التحاليل", pharmacy: "الصيدلية", entities: "المنشآت والأوراق الرسمية",
   con_dashboard: "لوحة المقاولات", workers: "الصنايعية والمهندسون",
@@ -88,7 +142,7 @@ function switchView(view) {
   document.querySelectorAll(".nav-item[data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === view));
   el("view-title").textContent = VIEW_TITLES[view] || view;
   el("content").innerHTML = '<div class="empty">جارِ التحميل…</div>';
-  ({ dashboard: viewDashboard, finance: viewFinance, sectors: viewSectors, appointments: viewAppointments,
+  ({ dashboard: viewDashboard, requests: viewRequests, finance: viewFinance, sectors: viewSectors, appointments: viewAppointments,
      patients: viewPatients, doctors: viewDoctors, radiology: viewRadiology,
      labs: viewLabs, pharmacy: viewPharmacy, entities: viewEntities,
      con_dashboard: viewConDashboard, workers: viewWorkers,
@@ -102,9 +156,10 @@ function switchView(view) {
 async function loadNotifications() {
   try {
     const n = await api("/notifications");
+    window._notifs = n;
     const unseen = n.filter(x => !x.seen).length;
     const b = el("notif-badge");
-    if (unseen) { b.style.display = "inline-block"; b.textContent = "🔔 " + unseen; } else b.style.display = "none";
+    if (unseen) { b.style.display = "inline-block"; b.textContent = unseen; } else b.style.display = "none";
   } catch (e) {}
 }
 
@@ -1330,6 +1385,95 @@ function updateCase(id, status, next) {
 async function saveUpdateCase(id) {
   await api("/law/cases/" + id, { method: "PUT", body: form({ status: el("uc-status").value, next_session: el("uc-next").value }) });
   closeModal(); toast("تم التحديث"); viewLaw();
+}
+
+/* ================= بوابة الطلبات الموحّدة ================= */
+const REQ_STATUS = ["جديد", "قيد المعالجة", "محوّل", "مكتمل", "ملغي"];
+let _reqSector = "", _reqStatus = "", _reqServiceTypes = null;
+async function viewRequests() {
+  const [dash, list] = await Promise.all([api("/requests/dashboard"), reqList()]);
+  if (!_reqServiceTypes) _reqServiceTypes = await api("/requests/service-types");
+  el("content").innerHTML = `
+    <div class="cards">
+      ${statCard("📨", "إجمالي الطلبات", dash.total)}
+      ${statCard("🆕", "جديدة", dash.new)}
+      ${statCard("⚙️", "قيد المعالجة", dash.processing)}
+      ${statCard("🔴", "عاجلة", dash.urgent)}
+      ${statCard("✅", "مكتملة", dash.completed)}
+    </div>
+    <div class="panel">
+      <h3>الطلبات حسب القطاع</h3>
+      <div class="chip-row">
+        ${dash.by_sector.map(b => `<div class="chip">${b.icon} ${esc(b.name)} <span class="pill gray">${b.c}</span></div>`).join("") || '<span class="hint">لا يوجد</span>'}
+      </div>
+    </div>
+    <div class="toolbar">
+      <button class="btn" onclick="newRequest()">+ طلب خدمة جديد</button>
+      <select id="req-sector" onchange="setReqSector(this.value)">
+        <option value="">كل القطاعات</option>
+        ${SECTORS_LIST.map(([k, n]) => `<option value="${k}" ${_reqSector === k ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <select id="req-status" onchange="setReqStatus(this.value)">
+        <option value="">كل الحالات</option>
+        ${REQ_STATUS.map(s => `<option ${_reqStatus === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+    </div>
+    <div class="panel"><div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>القطاع</th><th>الخدمة</th><th>مقدّم الطلب</th><th>الهاتف</th><th>المحافظة</th><th>الأولوية</th><th>الحالة</th><th>إجراء</th></tr></thead>
+      <tbody>${reqRows(list)}</tbody>
+    </table></div></div>`;
+}
+async function reqList() {
+  let url = "/requests?";
+  if (_reqSector) url += "sector=" + _reqSector + "&";
+  if (_reqStatus) url += "status=" + encodeURIComponent(_reqStatus);
+  return api(url);
+}
+function reqRows(list) {
+  if (!list.length) return `<tr><td colspan="9"><div class="empty">لا توجد طلبات</div></td></tr>`;
+  const cls = { "جديد": "blue", "قيد المعالجة": "gold", "محوّل": "blue", "مكتمل": "green", "ملغي": "red" };
+  return list.map(r => `<tr>
+    <td>${r.id}</td><td>${r.sector_icon} ${esc(r.sector_name)}</td><td>${esc(r.service_type || "")}</td>
+    <td>${esc(r.requester_name)}</td><td>${esc(r.requester_phone || "—")}</td><td>${esc(r.governorate || "—")}</td>
+    <td>${r.priority === "عاجل" ? '<span class="pill red">عاجل</span>' : '<span class="pill gray">عادي</span>'}</td>
+    <td><span class="pill ${cls[r.status] || "gray"}">${esc(r.status)}</span></td>
+    <td><select class="btn sm ghost" style="padding:5px" onchange="setReqStatusVal(${r.id}, this.value)">
+      <option value="">تغيير…</option>${REQ_STATUS.map(s => `<option>${s}</option>`).join("")}</select></td>
+  </tr>`).join("");
+}
+function setReqSector(v) { _reqSector = v; viewRequests(); }
+function setReqStatus(v) { _reqStatus = v; viewRequests(); }
+async function setReqStatusVal(id, status) {
+  if (!status) return;
+  await api("/requests/" + id + "/status", { method: "PUT", body: form({ status }) });
+  toast("تم تحديث الطلب"); viewRequests();
+}
+function newRequest() {
+  const types = _reqServiceTypes || {};
+  openModal("طلب خدمة جديد", `
+    <div class="grid2">
+      <div class="field"><label>القطاع *</label><select id="nr-sector" onchange="updateReqTypes()">
+        ${SECTORS_LIST.map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select></div>
+      <div class="field"><label>نوع الخدمة</label><select id="nr-type"></select></div>
+      <div class="field"><label>مقدّم الطلب *</label><input id="nr-name"></div>
+      <div class="field"><label>الهاتف</label><input id="nr-phone"></div>
+      <div class="field"><label>المحافظة</label><input id="nr-gov"></div>
+      <div class="field"><label>الأولوية</label><select id="nr-priority"><option>عادي</option><option>عاجل</option></select></div>
+    </div>
+    <div class="field"><label>تفاصيل الطلب</label><textarea id="nr-details" rows="2"></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="saveRequest()">إرسال الطلب</button><button class="btn ghost" onclick="closeModal()">إلغاء</button></div>`);
+  updateReqTypes();
+}
+function updateReqTypes() {
+  const sector = el("nr-sector").value;
+  const types = (_reqServiceTypes || {})[sector] || [];
+  el("nr-type").innerHTML = types.map(t => `<option>${esc(t)}</option>`).join("") || '<option value="">—</option>';
+}
+async function saveRequest() {
+  const name = el("nr-name").value.trim(); if (!name) return toast("اسم مقدّم الطلب مطلوب");
+  await api("/requests", { json: {
+    sector: el("nr-sector").value, service_type: el("nr-type").value, requester_name: name,
+    requester_phone: el("nr-phone").value, governorate: el("nr-gov").value,
+    priority: el("nr-priority").value, details: el("nr-details").value } });
+  closeModal(); toast("تم إرسال الطلب"); viewRequests();
 }
 
 /* ---------- بدء التطبيق ---------- */

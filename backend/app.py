@@ -252,6 +252,176 @@ def add_payment(request: Request, data: PaymentIn):
 
 
 # ============================================================================
+# بوابة الطلبات الموحّدة — نقطة دخول واحدة لكل خدمات القطاعات
+# ============================================================================
+SERVICE_TYPES = {
+    "medical": ["حجز كشف", "استشارة", "تحاليل", "أشعة", "عملية"],
+    "contracting": ["طلب صنايعي", "طلب مقاول", "عرض سعر", "معاينة موقع", "طلب مهندس"],
+    "realestate": ["معاينة وحدة", "استفسار سعر", "حجز وحدة", "طلب تطوير"],
+    "marketing": ["حملة إعلانية", "هوية بصرية", "إدارة سوشيال ميديا", "استشارة تسويقية"],
+    "mobility": ["طلب رحلة", "حجز مشوار", "توصيل"],
+    "logistics": ["طلب شحن", "تتبّع شحنة", "استلام من الباب"],
+    "agriculture": ["استشارة زراعية", "توريد محصول", "طلب معدات"],
+    "law": ["استشارة قانونية", "رفع قضية", "توكيل", "صياغة عقد"],
+}
+
+
+@app.get("/api/requests")
+def list_requests(request: Request, sector: Optional[str] = None, status: Optional[str] = None):
+    require(request)
+    conn = db.get_conn()
+    q = """SELECT r.*, u.full_name AS assignee FROM service_requests r
+           LEFT JOIN users u ON u.id=r.assigned_to WHERE 1=1"""
+    a = []
+    if sector:
+        q += " AND r.sector=?"; a.append(sector)
+    if status:
+        q += " AND r.status=?"; a.append(status)
+    q += " ORDER BY CASE r.priority WHEN 'عاجل' THEN 0 ELSE 1 END, r.id DESC"
+    r = rows(conn.execute(q, a))
+    for x in r:
+        x["sector_name"] = SECTOR_META.get(x["sector"], {}).get("name", x["sector"])
+        x["sector_icon"] = SECTOR_META.get(x["sector"], {}).get("icon", "")
+    conn.close()
+    return r
+
+
+@app.get("/api/requests/service-types")
+def request_service_types(request: Request):
+    require(request)
+    return SERVICE_TYPES
+
+
+@app.get("/api/requests/dashboard")
+def requests_dashboard(request: Request):
+    require(request)
+    conn = db.get_conn()
+    def c(qq, *a):
+        return conn.execute(qq, a).fetchone()[0]
+    data = {
+        "total": c("SELECT COUNT(*) FROM service_requests"),
+        "new": c("SELECT COUNT(*) FROM service_requests WHERE status='جديد'"),
+        "processing": c("SELECT COUNT(*) FROM service_requests WHERE status='قيد المعالجة'"),
+        "urgent": c("SELECT COUNT(*) FROM service_requests WHERE priority='عاجل' AND status NOT IN ('مكتمل','ملغي')"),
+        "completed": c("SELECT COUNT(*) FROM service_requests WHERE status='مكتمل'"),
+        "by_sector": rows(conn.execute(
+            "SELECT sector, COUNT(*) c FROM service_requests GROUP BY sector ORDER BY c DESC")),
+    }
+    for b in data["by_sector"]:
+        b["name"] = SECTOR_META.get(b["sector"], {}).get("name", b["sector"])
+        b["icon"] = SECTOR_META.get(b["sector"], {}).get("icon", "")
+    conn.close()
+    return data
+
+
+class ServiceRequestIn(BaseModel):
+    sector: str
+    service_type: Optional[str] = None
+    requester_name: str
+    requester_phone: Optional[str] = None
+    governorate: Optional[str] = None
+    details: Optional[str] = None
+    priority: str = "عادي"
+
+
+@app.post("/api/requests")
+def create_request(request: Request, data: ServiceRequestIn):
+    require(request)
+    conn = db.get_conn()
+    cur = conn.execute(
+        """INSERT INTO service_requests (sector,service_type,requester_name,requester_phone,governorate,details,priority,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?, 'جديد', ?, ?)""",
+        (data.sector, data.service_type, data.requester_name, data.requester_phone,
+         data.governorate, data.details, data.priority, now(), now()))
+    rid = cur.lastrowid
+    # إشعار للمسؤولين المعنيين بالقطاع
+    role_map = {"medical": "reception", "contracting": "contractor", "realestate": "agent"}
+    role = role_map.get(data.sector)
+    if role:
+        for u in rows(conn.execute("SELECT id FROM users WHERE role=?", (role,))):
+            conn.execute("INSERT INTO notifications (user_id,channel,title,body,created_at) VALUES (?,?,?,?,?)",
+                         (u["id"], "system", "طلب خدمة جديد",
+                          f"طلب {data.service_type or ''} من {data.requester_name}", now()))
+    conn.commit()
+    conn.close()
+    return {"id": rid}
+
+
+@app.put("/api/requests/{rid}/status")
+def request_status(request: Request, rid: int, status: str = Form(...)):
+    require(request)
+    conn = db.get_conn()
+    conn.execute("UPDATE service_requests SET status=?, updated_at=? WHERE id=?", (status, now(), rid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ============================================================================
+# البحث الموحّد — عبر كل القطاعات
+# ============================================================================
+@app.get("/api/search")
+def global_search(request: Request, q: str):
+    require(request)
+    if not q or len(q.strip()) < 1:
+        return {"results": []}
+    conn = db.get_conn()
+    like = f"%{q.strip()}%"
+    results = []
+
+    def add(items, typ, label_key, sub, sector, view):
+        for it in items:
+            results.append({
+                "type": typ, "id": it["id"], "label": it.get(label_key, ""),
+                "sub": sub(it), "sector": sector, "view": view})
+
+    add(rows(conn.execute("SELECT * FROM med_patients WHERE full_name LIKE ? OR national_id LIKE ? OR phone LIKE ? LIMIT 6", (like, like, like))),
+        "مريض", "full_name", lambda x: f"🧑‍⚕️ {x.get('phone') or ''} · {x.get('governorate') or ''}", "medical", "patients")
+    add(rows(conn.execute("SELECT * FROM med_doctors WHERE full_name LIKE ? LIMIT 6", (like,))),
+        "طبيب", "full_name", lambda x: "👨‍⚕️ طبيب", "medical", "doctors")
+    add(rows(conn.execute("SELECT * FROM con_workers WHERE full_name LIKE ? OR trade LIKE ? LIMIT 6", (like, like))),
+        "فني", "full_name", lambda x: f"👷 {x.get('trade') or ''} · {x.get('governorate') or ''}", "contracting", "workers")
+    add(rows(conn.execute("SELECT * FROM re_units WHERE unit_code LIKE ? OR unit_type LIKE ? LIMIT 6", (like, like))),
+        "وحدة", "unit_code", lambda x: f"🔑 {x.get('unit_type') or ''} · {x.get('status') or ''}", "realestate", "re_units")
+    add(rows(conn.execute("SELECT * FROM mkt_leads WHERE name LIKE ? OR phone LIKE ? LIMIT 6", (like, like))),
+        "عميل محتمل", "name", lambda x: f"🎯 {x.get('stage') or ''} · {x.get('source') or ''}", "marketing", "re_leads")
+    add(rows(conn.execute("SELECT * FROM log_shipments WHERE tracking_no LIKE ? OR sender LIKE ? OR receiver LIKE ? LIMIT 6", (like, like, like))),
+        "شحنة", "tracking_no", lambda x: f"🚚 {x.get('sender') or ''} ← {x.get('receiver') or ''}", "logistics", "logistics")
+    add(rows(conn.execute("SELECT * FROM law_cases WHERE case_no LIKE ? OR client_name LIKE ? LIMIT 6", (like, like))),
+        "قضية", "case_no", lambda x: f"⚖️ {x.get('client_name') or ''} · {x.get('status') or ''}", "law", "law")
+    add(rows(conn.execute("SELECT * FROM entities WHERE name LIKE ? LIMIT 6", (like,))),
+        "منشأة", "name", lambda x: f"🏢 {x.get('governorate') or ''}", "core", "entities")
+    add(rows(conn.execute("SELECT * FROM service_requests WHERE requester_name LIKE ? OR service_type LIKE ? LIMIT 6", (like, like))),
+        "طلب خدمة", "requester_name", lambda x: f"📨 {x.get('service_type') or ''} · {x.get('status') or ''}", "core", "requests")
+
+    conn.close()
+    return {"results": results, "count": len(results)}
+
+
+# ============================================================================
+# مركز الإشعارات — تعليم كمقروء
+# ============================================================================
+@app.put("/api/notifications/{nid}/seen")
+def notif_seen(request: Request, nid: int):
+    u = require(request)
+    conn = db.get_conn()
+    conn.execute("UPDATE notifications SET seen=1 WHERE id=? AND user_id=?", (nid, u["id"]))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.put("/api/notifications/seen-all")
+def notif_seen_all(request: Request):
+    u = require(request)
+    conn = db.get_conn()
+    conn.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (u["id"],))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ============================================================================
 # النواة: الكيانات والأوراق الرسمية والتقييمات
 # ============================================================================
 @app.get("/api/entities")
