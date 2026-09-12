@@ -62,6 +62,7 @@ function startApp() {
   el("user-name").textContent = USER.full_name || USER.username;
   const roles = { admin: "مدير", doctor: "طبيب", reception: "استقبال", pharmacist: "صيدلية", lab: "معمل", radiology: "أشعة", manager: "مشرف", user: "مستخدم" };
   el("user-role").textContent = roles[USER.role] || USER.role;
+  applyPermissions();
   document.querySelectorAll(".nav-item[data-view]").forEach(b => {
     b.onclick = () => switchView(b.dataset.view);
   });
@@ -126,8 +127,32 @@ async function markAllSeen() {
   window._notifs = []; closeModal(); loadNotifications(); toast("تم تعليم الكل كمقروء");
 }
 
+/* ---------- الصلاحيات: أي شاشات يراها كل دور ---------- */
+const ALL_VIEWS = ["dashboard","requests","crm","reports","finance","users","sectors",
+  "appointments","patients","doctors","radiology","labs","pharmacy","entities",
+  "con_dashboard","workers","con_projects","con_firms",
+  "re_dashboard","re_projects","re_units","re_leads",
+  "marketing","mobility","logistics","agriculture","law"];
+const ROLE_VIEWS = {
+  admin: ALL_VIEWS,
+  manager: ALL_VIEWS,
+  doctor: ["dashboard","requests","crm","appointments","patients","doctors","radiology","labs"],
+  reception: ["requests","crm","appointments","patients","doctors"],
+  pharmacist: ["pharmacy","requests"],
+  contractor: ["con_dashboard","requests","crm","workers","con_projects","con_firms"],
+  agent: ["re_dashboard","requests","crm","re_projects","re_units","re_leads","marketing"],
+  user: ["dashboard","requests","sectors"],
+};
+function allowedViews() { return ROLE_VIEWS[USER.role] || ALL_VIEWS; }
+function applyPermissions() {
+  const allowed = allowedViews();
+  document.querySelectorAll(".nav-item[data-view]").forEach(b => {
+    b.style.display = allowed.includes(b.dataset.view) ? "" : "none";
+  });
+}
+
 const VIEW_TITLES = {
-  dashboard: "مركز القيادة الموحّد", requests: "بوابة الطلبات الموحّدة", finance: "المالية عبر القطاعات", sectors: "القطاعات", appointments: "الحجوزات",
+  dashboard: "مركز القيادة الموحّد", requests: "بوابة الطلبات الموحّدة", crm: "العملاء الموحّد (CRM)", reports: "التقارير والتحليلات", finance: "المالية عبر القطاعات", users: "المستخدمون والصلاحيات", sectors: "القطاعات", appointments: "الحجوزات",
   patients: "المرضى والسجل المرضي", doctors: "الأطباء والتخصصات", radiology: "الأشعة",
   labs: "التحاليل", pharmacy: "الصيدلية", entities: "المنشآت والأوراق الرسمية",
   con_dashboard: "لوحة المقاولات", workers: "الصنايعية والمهندسون",
@@ -139,10 +164,15 @@ const VIEW_TITLES = {
 };
 
 function switchView(view) {
+  if (USER && !allowedViews().includes(view)) {
+    el("content").innerHTML = '<div class="empty">🔒 لا تملك صلاحية الوصول لهذه الشاشة</div>';
+    el("view-title").textContent = "غير مصرّح";
+    return;
+  }
   document.querySelectorAll(".nav-item[data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === view));
   el("view-title").textContent = VIEW_TITLES[view] || view;
   el("content").innerHTML = '<div class="empty">جارِ التحميل…</div>';
-  ({ dashboard: viewDashboard, requests: viewRequests, finance: viewFinance, sectors: viewSectors, appointments: viewAppointments,
+  ({ dashboard: viewDashboard, requests: viewRequests, crm: viewCRM, reports: viewReports, users: viewUsers, finance: viewFinance, sectors: viewSectors, appointments: viewAppointments,
      patients: viewPatients, doctors: viewDoctors, radiology: viewRadiology,
      labs: viewLabs, pharmacy: viewPharmacy, entities: viewEntities,
      con_dashboard: viewConDashboard, workers: viewWorkers,
@@ -1434,10 +1464,19 @@ function reqRows(list) {
     <td>${r.id}</td><td>${r.sector_icon} ${esc(r.sector_name)}</td><td>${esc(r.service_type || "")}</td>
     <td>${esc(r.requester_name)}</td><td>${esc(r.requester_phone || "—")}</td><td>${esc(r.governorate || "—")}</td>
     <td>${r.priority === "عاجل" ? '<span class="pill red">عاجل</span>' : '<span class="pill gray">عادي</span>'}</td>
-    <td><span class="pill ${cls[r.status] || "gray"}">${esc(r.status)}</span></td>
-    <td><select class="btn sm ghost" style="padding:5px" onchange="setReqStatusVal(${r.id}, this.value)">
-      <option value="">تغيير…</option>${REQ_STATUS.map(s => `<option>${s}</option>`).join("")}</select></td>
+    <td><span class="pill ${cls[r.status] || "gray"}">${esc(r.status)}</span>${r.linked_id ? ` <span class="pill green">↪ ${esc(r.linked_type)}#${r.linked_id}</span>` : ""}</td>
+    <td style="display:flex;gap:4px">
+      ${r.linked_id ? "" : `<button class="btn sm accent" onclick="convertRequest(${r.id})" title="تحويل لسجل فعلي في القطاع">↪ تحويل</button>`}
+      <select class="btn sm ghost" style="padding:5px" onchange="setReqStatusVal(${r.id}, this.value)">
+        <option value="">حالة…</option>${REQ_STATUS.map(s => `<option>${s}</option>`).join("")}</select></td>
   </tr>`).join("");
+}
+async function convertRequest(id) {
+  try {
+    const r = await api("/requests/" + id + "/convert", { method: "POST" });
+    toast("تم التحويل إلى " + r.linked_type + " #" + r.linked_id);
+    viewRequests();
+  } catch (e) { toast(e.message); }
 }
 function setReqSector(v) { _reqSector = v; viewRequests(); }
 function setReqStatus(v) { _reqStatus = v; viewRequests(); }
@@ -1474,6 +1513,147 @@ async function saveRequest() {
     requester_phone: el("nr-phone").value, governorate: el("nr-gov").value,
     priority: el("nr-priority").value, details: el("nr-details").value } });
   closeModal(); toast("تم إرسال الطلب"); viewRequests();
+}
+
+/* ================= CRM موحّد ================= */
+async function viewCRM() {
+  const list = await api("/crm/contacts");
+  el("content").innerHTML = `
+    <div class="toolbar">
+      <input id="crm-search" placeholder="بحث بالاسم/الهاتف" oninput="searchCRM()">
+      <div class="spacer"></div>
+      <span class="hint">جهات الاتصال مدمجة من الطبي + التسويق/العقاري + الطلبات</span>
+    </div>
+    <div class="cards" id="crm-cards">${crmCards(list)}</div>`;
+}
+function crmCards(list) {
+  if (!list.length) return `<div class="empty">لا توجد جهات اتصال</div>`;
+  return list.map(c => `<div class="stat" style="cursor:pointer" onclick="crm360('${esc(c.phone || "")}','${esc(c.name || "")}')">
+    <div class="k">👤 ${c.sources.length} قطاع</div>
+    <div class="v sm">${esc(c.name || "—")}</div>
+    <div class="tl-meta">📞 ${esc(c.phone || "—")}</div>
+    <div class="chip-row" style="margin-top:8px">${c.sources.map(s => `<span class="pill blue">${esc(s)}</span>`).join("")}</div>
+  </div>`).join("");
+}
+let _crmTimer;
+function searchCRM() {
+  clearTimeout(_crmTimer);
+  _crmTimer = setTimeout(async () => {
+    const list = await api("/crm/contacts?q=" + encodeURIComponent(el("crm-search").value));
+    el("crm-cards").innerHTML = crmCards(list);
+  }, 250);
+}
+async function crm360(phone, name) {
+  const p = await api("/crm/360?phone=" + encodeURIComponent(phone) + "&name=" + encodeURIComponent(name));
+  const sections = Object.entries(p.records).filter(([k, v]) => v.length);
+  openModal("ملف العميل 360° — " + esc(name || phone), `
+    <div class="chip-row"><span class="pill green">${p.total} سجل عبر القطاعات</span>${phone ? `<span class="pill gray">📞 ${esc(phone)}</span>` : ""}</div>
+    ${sections.length ? sections.map(([k, items]) => `
+      <div class="section-title">${esc(k)} (${items.length})</div>
+      ${items.map(it => `<div class="stat" style="margin-bottom:6px;padding:10px">
+        <div class="tl-meta">${Object.entries(it).filter(([kk]) => kk !== "id").map(([kk, vv]) => `${esc(kk)}: <b>${esc(vv == null ? "—" : vv)}</b>`).join(" · ")}</div>
+      </div>`).join("")}`).join("") : '<div class="empty">لا توجد سجلات مرتبطة</div>'}`);
+}
+
+/* ================= التقارير والتحليلات ================= */
+function bar(label, value, max, extra) {
+  const pct = max > 0 ? Math.round(value / max * 100) : 0;
+  return `<div style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>${label}</span><span style="color:var(--primary)">${extra || value}</span></div>
+    <div style="background:var(--surface-2);border-radius:20px;height:10px;overflow:hidden"><div style="background:var(--primary);height:100%;width:${pct}%"></div></div>
+  </div>`;
+}
+async function viewReports() {
+  const d = await api("/reports");
+  const maxMonth = Math.max(1, ...d.monthly_revenue.map(m => m.total));
+  const maxRev = Math.max(1, ...d.revenue_by_sector.map(m => m.total));
+  const maxReq = Math.max(1, ...d.requests_by_sector.map(m => m.c));
+  el("content").innerHTML = `
+    <div class="cards">
+      ${d.activity.map(a => statCard(a.icon, a.label, a.value)).join("")}
+    </div>
+    <div class="panel-row">
+      <div class="panel-col"><div class="panel">
+        <h3>الإيرادات الشهرية</h3>
+        ${d.monthly_revenue.length ? d.monthly_revenue.map(m => bar(m.month, m.total, maxMonth, money(m.total))).join("") : '<div class="empty">لا توجد بيانات</div>'}
+      </div></div>
+      <div class="panel-col"><div class="panel">
+        <h3>الإيرادات حسب القطاع</h3>
+        ${d.revenue_by_sector.length ? d.revenue_by_sector.map(m => bar(`${m.icon} ${esc(m.name)}`, m.total, maxRev, money(m.total))).join("") : '<div class="empty">لا توجد بيانات</div>'}
+      </div></div>
+    </div>
+    <div class="panel-row">
+      <div class="panel-col"><div class="panel">
+        <h3>الطلبات حسب القطاع</h3>
+        ${d.requests_by_sector.length ? d.requests_by_sector.map(m => bar(`${m.icon} ${esc(m.name)}`, m.c, maxReq)).join("") : '<div class="empty">لا توجد بيانات</div>'}
+      </div></div>
+      <div class="panel-col"><div class="panel">
+        <h3>أعلى الأطباء تقييمًا</h3>
+        <div class="table-wrap"><table><tbody>
+          ${d.top_doctors.map(x => `<tr><td>${esc(x.full_name)}</td><td class="stars">${stars(x.rating)}</td><td>${(x.rating||0).toFixed(1)} (${x.rating_count})</td></tr>`).join("")}
+        </tbody></table></div>
+        <h3 style="margin-top:14px">أعلى الفنيين تقييمًا</h3>
+        <div class="table-wrap"><table><tbody>
+          ${d.top_workers.map(x => `<tr><td>${esc(x.full_name)}</td><td>${esc(x.trade || "")}</td><td class="stars">${stars(x.rating)}</td><td>${(x.rating||0).toFixed(1)}</td></tr>`).join("")}
+        </tbody></table></div>
+      </div></div>
+    </div>`;
+}
+
+/* ================= المستخدمون والصلاحيات ================= */
+const ROLES = ["admin", "manager", "doctor", "reception", "pharmacist", "contractor", "agent", "user"];
+const ROLE_AR = { admin: "مدير عام", manager: "مشرف", doctor: "طبيب", reception: "استقبال", pharmacist: "صيدلية", contractor: "مقاولات", agent: "تسويق عقاري", user: "مستخدم", lab: "معمل", radiology: "أشعة" };
+async function viewUsers() {
+  const list = await api("/users");
+  el("content").innerHTML = `
+    <div class="toolbar"><button class="btn" onclick="newUser()">+ مستخدم جديد</button>
+      <div class="spacer"></div><span class="hint">كل دور يرى شاشاته المصرّح بها فقط</span></div>
+    <div class="panel"><div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>المستخدم</th><th>الاسم</th><th>الدور</th><th>القطاع</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+      <tbody>${list.map(u => `<tr>
+        <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.full_name || "—")}</td>
+        <td><span class="pill blue">${esc(ROLE_AR[u.role] || u.role)}</span></td><td>${esc(u.sector || "—")}</td>
+        <td><span class="pill ${u.active ? "green" : "red"}">${u.active ? "نشط" : "موقوف"}</span></td>
+        <td style="display:flex;gap:4px">
+          <button class="btn sm ghost" onclick="editUser(${u.id}, '${u.role}')">الدور</button>
+          <button class="btn sm ${u.active ? "danger" : "accent"}" onclick="toggleUser(${u.id}, ${u.active ? 0 : 1})">${u.active ? "إيقاف" : "تفعيل"}</button>
+        </td></tr>`).join("")}</tbody>
+    </table></div></div>`;
+}
+function newUser() {
+  openModal("مستخدم جديد", `
+    <div class="grid2">
+      <div class="field"><label>اسم المستخدم *</label><input id="nu-username"></div>
+      <div class="field"><label>كلمة المرور *</label><input id="nu-pass"></div>
+      <div class="field"><label>الاسم الكامل</label><input id="nu-fullname"></div>
+      <div class="field"><label>الدور</label><select id="nu-role">${ROLES.map(r => `<option value="${r}">${ROLE_AR[r]}</option>`).join("")}</select></div>
+      <div class="field"><label>الهاتف</label><input id="nu-uphone"></div>
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="saveUser()">حفظ</button><button class="btn ghost" onclick="closeModal()">إلغاء</button></div>`);
+}
+async function saveUser() {
+  const un = el("nu-username").value.trim(), pw = el("nu-pass").value.trim();
+  if (!un || !pw) return toast("اسم المستخدم وكلمة المرور مطلوبان");
+  try {
+    await api("/users", { json: { username: un, password: pw, full_name: el("nu-fullname").value, role: el("nu-role").value, phone: el("nu-uphone").value } });
+    closeModal(); toast("تم إنشاء المستخدم"); viewUsers();
+  } catch (e) { toast(e.message); }
+}
+function editUser(id, role) {
+  openModal("تغيير الدور", `
+    <div class="field"><label>الدور</label><select id="eu-role">${ROLES.map(r => `<option value="${r}" ${r === role ? "selected" : ""}>${ROLE_AR[r]}</option>`).join("")}</select></div>
+    <div class="field"><label>كلمة مرور جديدة (اختياري)</label><input id="eu-pass"></div>
+    <div class="modal-actions"><button class="btn" onclick="saveEditUser(${id})">حفظ</button><button class="btn ghost" onclick="closeModal()">إلغاء</button></div>`);
+}
+async function saveEditUser(id) {
+  const body = { role: el("eu-role").value };
+  const pw = el("eu-pass").value.trim(); if (pw) body.password = pw;
+  await api("/users/" + id, { method: "PUT", body: form(body) });
+  closeModal(); toast("تم التحديث"); viewUsers();
+}
+async function toggleUser(id, active) {
+  await api("/users/" + id, { method: "PUT", body: form({ active }) });
+  toast("تم التحديث"); viewUsers();
 }
 
 /* ---------- بدء التطبيق ---------- */

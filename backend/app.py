@@ -63,6 +63,13 @@ def require(request: Request):
     return u
 
 
+def require_role(request: Request, roles):
+    u = require(request)
+    if u["role"] not in roles:
+        raise HTTPException(status_code=403, detail="لا تملك صلاحية الوصول لهذه الخدمة")
+    return u
+
+
 def audit(user, method, path):
     try:
         conn = db.get_conn()
@@ -211,7 +218,7 @@ def overview_kpis(request: Request):
 
 @app.get("/api/payments")
 def list_payments(request: Request, sector: Optional[str] = None, direction: Optional[str] = None):
-    require(request)
+    require_role(request, ["admin", "manager"])
     conn = db.get_conn()
     q = "SELECT * FROM payments WHERE 1=1"
     a = []
@@ -239,7 +246,7 @@ class PaymentIn(BaseModel):
 
 @app.post("/api/payments")
 def add_payment(request: Request, data: PaymentIn):
-    require(request)
+    require_role(request, ["admin", "manager"])
     conn = db.get_conn()
     cur = conn.execute(
         """INSERT INTO payments (sector,direction,ref_type,payer,amount,method,status,paid_at,notes,created_at)
@@ -357,6 +364,84 @@ def request_status(request: Request, rid: int, status: str = Form(...)):
     return {"ok": True}
 
 
+@app.post("/api/requests/{rid}/convert")
+def convert_request(request: Request, rid: int):
+    """تحويل الطلب الموحّد إلى سجل فعلي في القطاع المختص."""
+    require(request)
+    conn = db.get_conn()
+    r = one(conn.execute("SELECT * FROM service_requests WHERE id=?", (rid,)))
+    if not r:
+        conn.close()
+        raise HTTPException(404, "الطلب غير موجود")
+    if r["linked_id"]:
+        conn.close()
+        raise HTTPException(400, "الطلب محوّل بالفعل")
+    sector = r["sector"]
+    name = r["requester_name"]
+    phone = r["requester_phone"]
+    gov = r["governorate"]
+    details = r["details"] or ""
+    linked_type, linked_id = None, None
+
+    if sector == "medical":
+        # أنشئ مريضًا إن لم يوجد بنفس الهاتف
+        p = one(conn.execute("SELECT id FROM med_patients WHERE phone=? AND phone IS NOT NULL", (phone,)))
+        if p:
+            linked_id = p["id"]
+        else:
+            cur = conn.execute("INSERT INTO med_patients (full_name,phone,governorate,created_at) VALUES (?,?,?,?)",
+                               (name, phone, gov, now()))
+            linked_id = cur.lastrowid
+        linked_type = "patient"
+    elif sector == "contracting":
+        cur = conn.execute(
+            """INSERT INTO con_projects (title,work_type,client_name,client_phone,governorate,progress,status,created_at)
+               VALUES (?,?,?,?,?,0,'جديد',?)""",
+            (r["service_type"] or "طلب مقاولات", r["service_type"] or "تشطيبات", name, phone, gov, now()))
+        linked_type, linked_id = "con_project", cur.lastrowid
+    elif sector in ("realestate", "marketing"):
+        cur = conn.execute(
+            """INSERT INTO mkt_leads (sector,name,phone,source,interest,stage,created_at)
+               VALUES (?,?,?, 'بوابة الطلبات', ?, 'جديد', ?)""",
+            (sector, name, phone, details or (r["service_type"] or ""), now()))
+        linked_type, linked_id = "lead", cur.lastrowid
+    elif sector == "mobility":
+        cur = conn.execute(
+            """INSERT INTO mob_trips (passenger_name,from_loc,to_loc,status,requested_at,created_at)
+               VALUES (?,?,?, 'مطلوبة', ?, ?)""",
+            (name, gov or "", details, now(), now()))
+        linked_type, linked_id = "trip", cur.lastrowid
+    elif sector == "logistics":
+        n = conn.execute("SELECT COUNT(*) FROM log_shipments").fetchone()[0] + 1
+        trk = f"EG{datetime.now().strftime('%y%m')}{n:04d}"
+        cur = conn.execute(
+            """INSERT INTO log_shipments (tracking_no,sender,receiver,from_gov,status,created_at)
+               VALUES (?,?,?,?, 'قيد التجهيز', ?)""",
+            (trk, name, details or "—", gov, now()))
+        linked_type, linked_id = "shipment", cur.lastrowid
+    elif sector == "agriculture":
+        cur = conn.execute(
+            """INSERT INTO agr_farms (owner_name,governorate,crop,status,created_at)
+               VALUES (?,?,?, 'قيد الزراعة', ?)""",
+            (name, gov, details, now()))
+        linked_type, linked_id = "farm", cur.lastrowid
+    elif sector == "law":
+        cur = conn.execute(
+            """INSERT INTO law_cases (client_name,case_type,status,notes,created_at)
+               VALUES (?,?, 'مفتوحة', ?, ?)""",
+            (name, r["service_type"] or "مدني", details, now()))
+        linked_type, linked_id = "case", cur.lastrowid
+    else:
+        conn.close()
+        raise HTTPException(400, "لا يدعم هذا القطاع التحويل التلقائي بعد")
+
+    conn.execute("UPDATE service_requests SET status='محوّل', linked_type=?, linked_id=?, updated_at=? WHERE id=?",
+                 (linked_type, linked_id, now(), rid))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "linked_type": linked_type, "linked_id": linked_id}
+
+
 # ============================================================================
 # البحث الموحّد — عبر كل القطاعات
 # ============================================================================
@@ -416,6 +501,175 @@ def notif_seen_all(request: Request):
     u = require(request)
     conn = db.get_conn()
     conn.execute("UPDATE notifications SET seen=1 WHERE user_id=?", (u["id"],))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ============================================================================
+# CRM موحّد — ملف العميل عبر كل القطاعات (رؤية 360°)
+# ============================================================================
+@app.get("/api/crm/contacts")
+def crm_contacts(request: Request, q: Optional[str] = None):
+    """قائمة جهات الاتصال الموحّدة (مدمجة بالهاتف) من كل القطاعات."""
+    require(request)
+    conn = db.get_conn()
+    like = f"%{(q or '').strip()}%"
+    contacts = {}  # phone -> {name, phone, sources:set}
+
+    def collect(sql, source):
+        for row in conn.execute(sql, (like, like) if q else ()):
+            d = dict(row)
+            key = d.get("phone") or ("name:" + (d.get("name") or ""))
+            if key not in contacts:
+                contacts[key] = {"name": d.get("name"), "phone": d.get("phone"), "governorate": d.get("gov"), "sources": []}
+            if source not in contacts[key]["sources"]:
+                contacts[key]["sources"].append(source)
+
+    filt = " WHERE full_name LIKE ? OR phone LIKE ?" if q else ""
+    collect(f"SELECT full_name AS name, phone, governorate AS gov FROM med_patients{filt}", "طبي")
+    filt2 = " WHERE name LIKE ? OR phone LIKE ?" if q else ""
+    collect(f"SELECT name, phone, NULL AS gov FROM mkt_leads{filt2}", "تسويق/عقاري")
+    filt3 = " WHERE requester_name LIKE ? OR requester_phone LIKE ?" if q else ""
+    collect(f"SELECT requester_name AS name, requester_phone AS phone, governorate AS gov FROM service_requests{filt3}", "طلبات")
+
+    result = list(contacts.values())
+    result.sort(key=lambda c: len(c["sources"]), reverse=True)
+    conn.close()
+    return result[:100]
+
+
+@app.get("/api/crm/360")
+def crm_360(request: Request, phone: Optional[str] = None, name: Optional[str] = None):
+    """رؤية 360° لعميل: كل سجلاته عبر القطاعات."""
+    require(request)
+    conn = db.get_conn()
+    prof = {"phone": phone, "name": name, "records": {}}
+    ph = phone or "___nomatch___"
+    nm = f"%{name}%" if name else "___nomatch___"
+
+    prof["records"]["مريض (طبي)"] = rows(conn.execute(
+        "SELECT id, full_name, national_id, phone FROM med_patients WHERE phone=? OR full_name LIKE ?", (ph, nm)))
+    prof["records"]["عملاء محتملون (عقاري/تسويق)"] = rows(conn.execute(
+        "SELECT id, name, phone, sector, stage, interest FROM mkt_leads WHERE phone=? OR name LIKE ?", (ph, nm)))
+    prof["records"]["طلبات الخدمة"] = rows(conn.execute(
+        "SELECT id, sector, service_type, status, priority FROM service_requests WHERE requester_phone=? OR requester_name LIKE ?", (ph, nm)))
+    prof["records"]["رحلات (تنقل)"] = rows(conn.execute(
+        "SELECT id, from_loc, to_loc, status, fare FROM mob_trips WHERE passenger_name LIKE ?", (nm,)))
+    prof["records"]["قضايا (محاماة)"] = rows(conn.execute(
+        "SELECT id, case_no, case_type, status FROM law_cases WHERE client_name LIKE ?", (nm,)))
+    prof["records"]["شحنات (لوجستيات)"] = rows(conn.execute(
+        "SELECT id, tracking_no, receiver, status FROM log_shipments WHERE sender LIKE ? OR receiver LIKE ?", (nm, nm)))
+
+    prof["total"] = sum(len(v) for v in prof["records"].values())
+    conn.close()
+    return prof
+
+
+# ============================================================================
+# التقارير والرسوم الزمنية
+# ============================================================================
+@app.get("/api/reports")
+def reports(request: Request):
+    require_role(request, ["admin", "manager"])
+    conn = db.get_conn()
+
+    # إيرادات شهرية (آخر 6 أشهر)
+    monthly = rows(conn.execute(
+        """SELECT substr(paid_at,1,7) AS month, COALESCE(SUM(amount),0) AS total
+           FROM payments WHERE direction='in' AND paid_at IS NOT NULL
+           GROUP BY substr(paid_at,1,7) ORDER BY month DESC LIMIT 6"""))
+    monthly.reverse()
+
+    revenue_by_sector = rows(conn.execute(
+        "SELECT sector, COALESCE(SUM(amount),0) AS total FROM payments WHERE direction='in' GROUP BY sector ORDER BY total DESC"))
+    for x in revenue_by_sector:
+        x["name"] = SECTOR_META.get(x["sector"], {}).get("name", x["sector"])
+        x["icon"] = SECTOR_META.get(x["sector"], {}).get("icon", "")
+
+    requests_by_sector = rows(conn.execute(
+        "SELECT sector, COUNT(*) AS c FROM service_requests GROUP BY sector ORDER BY c DESC"))
+    for x in requests_by_sector:
+        x["name"] = SECTOR_META.get(x["sector"], {}).get("name", x["sector"])
+        x["icon"] = SECTOR_META.get(x["sector"], {}).get("icon", "")
+
+    def c(qq):
+        return conn.execute(qq).fetchone()[0]
+    activity = [
+        {"label": "حجوزات طبية", "value": c("SELECT COUNT(*) FROM med_appointments"), "icon": "📅"},
+        {"label": "أوامر شغل", "value": c("SELECT COUNT(*) FROM con_projects"), "icon": "🏗️"},
+        {"label": "وحدات مباعة", "value": c("SELECT COUNT(*) FROM re_units WHERE status='مباع'"), "icon": "🏢"},
+        {"label": "رحلات", "value": c("SELECT COUNT(*) FROM mob_trips"), "icon": "🚗"},
+        {"label": "شحنات", "value": c("SELECT COUNT(*) FROM log_shipments"), "icon": "🚚"},
+        {"label": "قضايا", "value": c("SELECT COUNT(*) FROM law_cases"), "icon": "⚖️"},
+        {"label": "طلبات موحّدة", "value": c("SELECT COUNT(*) FROM service_requests"), "icon": "📨"},
+    ]
+    top_doctors = rows(conn.execute(
+        "SELECT full_name, rating, rating_count FROM med_doctors ORDER BY rating DESC LIMIT 5"))
+    top_workers = rows(conn.execute(
+        "SELECT full_name, trade, rating, rating_count FROM con_workers ORDER BY rating DESC LIMIT 5"))
+    conn.close()
+    return {"monthly_revenue": monthly, "revenue_by_sector": revenue_by_sector,
+            "requests_by_sector": requests_by_sector, "activity": activity,
+            "top_doctors": top_doctors, "top_workers": top_workers}
+
+
+# ============================================================================
+# إدارة المستخدمين والصلاحيات (admin فقط)
+# ============================================================================
+@app.get("/api/users")
+def list_users(request: Request):
+    require_role(request, ["admin"])
+    conn = db.get_conn()
+    r = rows(conn.execute("SELECT id, username, full_name, role, sector, phone, email, active, created_at FROM users ORDER BY id"))
+    conn.close()
+    return r
+
+
+class UserIn(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    role: str = "user"
+    sector: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+
+@app.post("/api/users")
+def create_user(request: Request, data: UserIn):
+    require_role(request, ["admin"])
+    conn = db.get_conn()
+    if one(conn.execute("SELECT id FROM users WHERE username=?", (data.username,))):
+        conn.close()
+        raise HTTPException(400, "اسم المستخدم موجود بالفعل")
+    salt = db.secrets.token_hex(8)
+    cur = conn.execute(
+        """INSERT INTO users (username,password_hash,salt,full_name,role,sector,phone,email,active,created_at)
+           VALUES (?,?,?,?,?,?,?,?,1,?)""",
+        (data.username, db._hash_pw(data.password, salt), salt, data.full_name, data.role,
+         data.sector, data.phone, data.email, now()))
+    conn.commit()
+    uid = cur.lastrowid
+    conn.close()
+    return {"id": uid}
+
+
+@app.put("/api/users/{uid}")
+def update_user(request: Request, uid: int, role: str = Form(None), active: int = Form(None), password: str = Form(None)):
+    require_role(request, ["admin"])
+    conn = db.get_conn()
+    u = one(conn.execute("SELECT * FROM users WHERE id=?", (uid,)))
+    if not u:
+        conn.close()
+        raise HTTPException(404, "المستخدم غير موجود")
+    if role is not None:
+        conn.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
+    if active is not None:
+        conn.execute("UPDATE users SET active=? WHERE id=?", (active, uid))
+    if password:
+        salt = db.secrets.token_hex(8)
+        conn.execute("UPDATE users SET password_hash=?, salt=? WHERE id=?", (db._hash_pw(password, salt), salt, uid))
     conn.commit()
     conn.close()
     return {"ok": True}
